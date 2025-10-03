@@ -1,0 +1,113 @@
+/*
+ * style.css: Gaya kustom untuk antarmuka chat.
+ * Layout dasar ditangani oleh Bootstrap.
+ */
+
+/* Kontainer Chat utama */
+#chat-container {
+    width: 100%;
+    max-width: 700px;
+    height: 90vh; /* Tinggi yang ditetapkan agar kotak obrolan dapat di-scroll */
+    display: flex;
+    flex-direction: column;
+}
+
+/* Kotak Obrolan */
+.chat-box {
+    flex-grow: 1;
+    overflow-y: auto;
+    padding: 15px;
+    background-color: #f9f9f9;
+}
+
+/* --- Gaya Kontainer Pesan (PENTING: Menggantikan float) --- */
+
+/* message-container adalah div terluar yang memiliki margin ms-auto/me-auto */
+.message-container {
+    max-width: 85%; /* Batasi lebar gelembung total */
+    display: flex;
+    flex-direction: column; /* Menumpuk File di atas Teks */
+    margin-bottom: 10px;
+    /* Kelas Bootstrap 'ms-auto' (user) dan 'me-auto' (bot) yang menangani perataan horizontal */
+}
+
+/* Jika Anda ingin perataan vertikal yang lebih eksplisit (biasanya sudah ditangani oleh ms/me-auto) */
+.message-container.user {
+    align-items: flex-end; /* File dan teks sejajar ke kanan */
+}
+
+.message-container.bot {
+    align-items: flex-start; /* File dan teks sejajar ke kiri */
+}
+
+
+/* --- Gaya Gelembung Pesan Teks Saja --- */
+
+/* message adalah div untuk teks dan elemen yang dikembalikan oleh appendMessage */
+.message {
+    padding: 10px 15px;
+    border-radius: 18px;
+    word-wrap: break-word;
+    /* Hapus max-width di sini, biarkan kontainer yang mengontrolnya */
+    max-width: 100%; 
+}
+
+/* Pesan Pengguna (Kanan) */
+.message.user {
+    /* Hapus float: right; */
+    background-color: #0d6efd; /* Primary Blue */
+    color: white;
+    /* Sudut untuk gelembung teks di bawah file */
+    border-top-right-radius: 18px; 
+    border-bottom-right-radius: 5px; 
+    border-top-left-radius: 18px;
+}
+
+/* Pesan Bot (Kiri) */
+.message.bot {
+    /* Hapus float: left; */
+    background-color: #e2e6ea; /* Light Gray/Secondary */
+    color: #212529; /* Dark text */
+    /* Sudut untuk gelembung teks bot */
+    border-top-left-radius: 18px;
+    border-bottom-left-radius: 5px; 
+    border-top-right-radius: 18px;
+}
+
+/* --- Gaya Pratinjau File (file-display-preview) --- */
+
+.file-display-preview {
+    background-color: #ffffff; /* Latar belakang pratinjau file */
+    border-color: #adb5bd !important;
+    text-align: left;
+    max-width: 100%; /* Mengambil lebar penuh kontainer */
+    border-radius: 18px 18px 5px 18px; /* Sudut kanan bawah kotak untuk file pengguna */
+    overflow: hidden; /* Memastikan gambar tetap di dalam batas */
+    cursor: default; /* Nonaktifkan kursor */
+}
+
+/* Jika file dari bot ada, gunakan gaya ini (Saat ini hanya pengguna yang menampilkan file) */
+.message-container.bot .file-display-preview {
+    border-radius: 18px 18px 18px 5px; /* Sudut kiri bawah kotak untuk file bot */
+}
+
+
+.file-display-preview img {
+    max-height: 200px; /* Batasi tinggi pratinjau gambar */
+    width: 100%;
+    object-fit: cover; /* Pastikan gambar mengisi area pratinjau */
+    display: block; 
+}
+
+/* Gaya tambahan untuk informasi file di footer */
+#file-info {
+    display: flex;
+    align-items: center;
+}
+
+/* Hapus clearfix yang tidak perlu lagi karena float dihapus */
+/* .chat-box::after {
+    content: "";
+    display: table;
+    clear: both;
+} */
