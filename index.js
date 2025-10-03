@@ -1,29 +1,32 @@
 import 'dotenv/config';
 import express from 'express';
 import multer from 'multer';
-// 1. PENINGKATAN: Destrukturisasi GoogleGenAI untuk import yang lebih bersih
 import { GoogleGenAI } from "@google/genai";
-import * as fs from 'fs/promises'; // Import fs/promises untuk penanganan/pembersihan file
+import * as fs from 'fs/promises'; 
+import * as os from 'os'; // Diperlukan untuk direktori sementara
 
 const app = express();
 
-// 2. PENINGKATAN: Mendefinisikan konstanta untuk batas ukuran file inline (4MB dalam byte)
+// --- Konfigurasi Konstanta ---
 const MAX_UKURAN_FILE_INLINE = 4 * 1024 * 1024; // 4MB
+const MAX_UKURAN_FILE_GEMINI_API = 2 * 1024 * 1024 * 1024; // 2GB (Batas File API)
+const GEMINI_MODEL = "gemini-2.5-flash"; // Model untuk teks dan multimodal
 
 // --- Konfigurasi Multer ---
-// Kita menggunakan memory storage agar file disimpan dalam buffer (req.file.buffer)
-// Ini cocok untuk file kecil-menengah (seperti gambar atau PDF kecil) yang akan dikirim secara inline.
-const upload = multer({ storage: multer.memoryStorage() });
+// Menggunakan memoryStorage karena kita akan menangani file di memori 
+// atau menulisnya ke temp disk secara manual untuk diunggah ke Gemini File API
+const upload = multer({ 
+    storage: multer.memoryStorage(),
+    limits: { fileSize: MAX_UKURAN_FILE_GEMINI_API } // Batas besar di Multer
+});
 
 // --- Inisialisasi GoogleGenAI ---
-// Klien akan secara otomatis mencari kunci API di variabel lingkungan (process.env.GEMINI_API_KEY atau process.env.API_KEY)
-// 3. PENINGKATAN: Tidak perlu meneruskan { apiKey: process.env.API_KEY } jika menggunakan dotenv/config
 const ai = new GoogleGenAI({});
 
-// **Tetapkan model Gemini default Anda di sini:**
-const GEMINI_MODEL = "gemini-2.5-flash"; // Cocok untuk tugas teks dan multimodal
-
 app.use(express.json());
+
+// Middleware untuk menyajikan file frontend
+app.use(express.static('public')); 
 
 // ====================================================================
 // FUNGSI UTILITAS GEMINI
@@ -31,42 +34,69 @@ app.use(express.json());
 
 /**
  * Mengekstrak teks yang dihasilkan dengan aman dari berbagai struktur respons API Gemini.
- * @param {object} resp - Objek respons mentah dari panggilan API Gemini.
- * @returns {string} Teks yang diekstrak atau JSON string dari respons lengkap saat terjadi kesalahan/fallback.
  */
 function ekstrakTeks(resp) {
-  try {
-    const text =
-      resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text ??
-      resp?.candidates?.[0]?.content?.parts?.[0]?.text ??
-      resp?.response?.text;
+    try {
+        const text =
+            resp?.response?.candidates?.[0]?.content?.parts?.[0]?.text ??
+            resp?.candidates?.[0]?.content?.parts?.[0]?.text ??
+            resp?.response?.text;
 
-    if (text) {
-      return text;
+        return text || "Kesalahan: Tidak dapat mengekstrak teks. Respons lengkap di bawah ini:\n" + JSON.stringify(resp, null, 2);
+    } catch (error) {
+        return "Kesalahan ekstraksi. Respons lengkap di bawah ini:\n" + JSON.stringify(resp, null, 2);
     }
-
-    // Fallback: Jika tidak ditemukan teks sederhana, kembalikan respons lengkap sebagai JSON string
-    return "Kesalahan: Tidak dapat mengekstrak teks. Respons lengkap di bawah ini:\n" + JSON.stringify(resp, null, 2);
-  } catch (error) {
-    console.error("Kesalahan saat mengekstrak teks:", error);
-    return "Kesalahan ekstraksi. Respons lengkap di bawah ini:\n" + JSON.stringify(resp, null, 2);
-  }
 }
 
 /**
  * Mengkonversi buffer file Multer menjadi objek GenerativePart API Gemini untuk data inline.
- * Ini digunakan untuk mengirim gambar atau file kecil langsung dalam permintaan.
- * @param {Buffer} buffer - Buffer file dari Multer (req.file.buffer).
- * @param {string} tipeMIME - Tipe MIME file (req.file.mimetype).
- * @returns {object} Objek GenerativePart yang cocok untuk array `contents` API Gemini.
  */
 function fileKeGenerativePart(buffer, tipeMIME) {
-  return {
-    inlineData: {
-      data: buffer.toString("base64"),
-      mimeType: tipeMIME,
-    },
-  };
+    return {
+        inlineData: {
+            data: buffer.toString("base64"),
+            mimeType: tipeMIME,
+        },
+    };
+}
+
+/**
+ * Mengkonversi array riwayat percakapan sederhana dari frontend 
+ * menjadi format 'contents' API Gemini.
+ */
+function konversiRiwayat(history) {
+    // Gemini API menggunakan peran 'user' dan 'model'
+    return history.map(msg => ({
+        role: msg.role,
+        parts: [{ text: msg.text }]
+    }));
+}
+
+/**
+ * Mengunggah buffer file ke Gemini API menggunakan File API. 
+ * Ini memungkinkan pemrosesan file yang lebih besar.
+ * CATATAN: File yang diunggah ke Gemini harus dihapus secara eksplisit setelah selesai.
+ *
+ * @returns {object} Objek FileData dari Gemini.
+ */
+async function uploadFileKeGemini(buffer, tipeMIME, originalName) {
+    const tempFilePath = os.tmpdir() + '/' + Date.now() + '-' + originalName.replace(/[^a-zA-Z0-9.]/g, '_');
+    
+    // Tulis ke file sementara untuk diunggah
+    await fs.writeFile(tempFilePath, buffer);
+
+    let uploadedFile;
+    try {
+        uploadedFile = await ai.files.upload({
+            file: tempFilePath,
+            mimeType: tipeMIME,
+            displayName: originalName,
+        });
+        return uploadedFile;
+    } finally {
+        // Bersihkan file sementara di sistem lokal
+        await fs.unlink(tempFilePath).catch(error => console.error("Gagal menghapus file sementara:", error));
+    }
 }
 
 // ====================================================================
@@ -74,259 +104,146 @@ function fileKeGenerativePart(buffer, tipeMIME) {
 // ====================================================================
 
 // 1. Endpoint Pembuatan Teks Sederhana
-/**
- * Endpoint POST untuk menangani pembuatan teks-saja yang sederhana.
- * Penggunaan: Kirim permintaan POST ke endpoint ini dengan body JSON: { "prompt": "Permintaan teks Anda" }
- */
 app.post('/generate-text', async (req, res) => {
     try {
         const { prompt } = req.body;
-
         if (!prompt) {
             return res.status(400).json({ error: 'Kolom "prompt" wajib diisi.' });
         }
-
-        console.log('Memanggil API Gemini untuk pembuatan teks...');
-        // 4. PENINGKATAN: Gunakan const untuk deklarasi fungsi async di dalam rute
         const resp = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: prompt, // Prompt teks sederhana
+            contents: prompt,
         });
-
         res.json({ result: ekstrakTeks(resp) });
-
     } catch (err) {
-        console.error('Kesalahan API:', err);
-        // Lebih aman untuk hanya mengekspos pesan kesalahan dan bukan seluruh objek kesalahan
         res.status(500).json({ error: err.message || 'Terjadi kesalahan server internal.' });
     }
 });
 
 
-// 2. Endpoint Pembuatan Multimodal (Teks + File Opsional)
-/**
- * Endpoint POST untuk menangani pembuatan multimodal (teks + file opsional).
- * Penggunaan: Kirim permintaan POST ke endpoint ini dengan body multipart/form-data.
- * - 'prompt': Instruksi teks untuk model.
- * - 'file': File opsional (gambar, PDF, dll.) untuk dianalisis.
- */
+// 2. Endpoint Pembuatan Multimodal (Fleksibel: Inline atau File API)
 app.post('/gemini/generate', upload.single('file'), async (req, res) => {
+    let geminiFileToDelete = null; // Untuk melacak file yang perlu dihapus dari Gemini
+    
     try {
         const { prompt } = req.body;
         const uploadedFile = req.file;
 
-        if (!prompt) {
-            return res.status(400).json({ error: 'Kolom "prompt" wajib diisi.' });
+        if (!prompt && !uploadedFile) {
+            return res.status(400).json({ success: false, error: 'Kolom "prompt" atau file wajib diisi.' });
         }
 
         let contents = [];
 
-        // 1. Tangani File (jika ada)
+        // --- Tangani File ---
         if (uploadedFile) {
-            console.log(`Memproses file: ${uploadedFile.originalname}, MIME: ${uploadedFile.mimetype}`);
+            let filePart;
             
-            // Periksa apakah file cukup kecil untuk dikirim secara inline
-            if (uploadedFile.size > MAX_UKURAN_FILE_INLINE) {
-                // 5. PENINGKATAN: Gunakan konstanta dan perjelas pesan kesalahan
+            if (uploadedFile.size <= MAX_UKURAN_FILE_INLINE) {
+                // File kecil (<= 4MB): Gunakan unggahan inline
+                filePart = fileKeGenerativePart(uploadedFile.buffer, uploadedFile.mimetype);
+                console.log(`File ${uploadedFile.originalname} diproses secara inline.`);
+            } else if (uploadedFile.size > MAX_UKURAN_FILE_GEMINI_API) {
+                 // File terlalu besar
                 return res.status(400).json({ 
-                    error: `File terlalu besar (${uploadedFile.size} bytes). Ukuran maksimal untuk upload inline adalah ${MAX_UKURAN_FILE_INLINE} bytes (4MB).` 
+                    success: false,
+                    error: `File terlalu besar (${uploadedFile.size} bytes). Ukuran maksimal yang didukung Gemini API adalah 2GB.` 
                 });
-            }
+            } else {
+                // File besar (> 4MB): Gunakan Gemini File API
+                const geminiFile = await uploadFileKeGemini(
+                    uploadedFile.buffer, 
+                    uploadedFile.mimetype, 
+                    uploadedFile.originalname || 'uploaded_file'
+                );
+                
+                // Simpan referensi untuk penghapusan
+                geminiFileToDelete = geminiFile.name; 
 
-            // Konversi buffer ke GenerativePart inline
-            const filePart = fileKeGenerativePart(uploadedFile.buffer, uploadedFile.mimetype);
+                // Generative Part menggunakan URI file
+                filePart = { fileData: { mimeType: geminiFile.mimeType, fileUri: geminiFile.uri } };
+                console.log(`File ${uploadedFile.originalname} diunggah ke Gemini File API: ${geminiFile.uri}`);
+            }
             contents.push(filePart);
         }
 
-        // 2. Tambahkan Prompt Teks
-        // Bungkus prompt dalam objek untuk mempertahankan struktur 'contents' sebagai array bagian
-        contents.push({ text: prompt });
+        // Tambahkan Prompt Teks
+        contents.push({ text: prompt || "Describe or analyze the provided file." }); 
 
-        // 3. Panggil API Gemini
-        console.log('Memanggil API Gemini...');
         const result = await ai.models.generateContent({
             model: GEMINI_MODEL,
             contents: contents,
         });
 
-        // 4. Ekstrak dan Kirim Respons
         const extractedText = ekstrakTeks(result);
-        res.json({ response: extractedText });
+        res.json({ success: true, response: extractedText }); 
 
     } catch (error) {
-        console.error('Kesalahan API:', error);
-        res.status(500).json({ error: 'Terjadi kesalahan server internal saat memproses permintaan.' });
+        console.error('Kesalahan API Multimodal:', error);
+        res.status(500).json({ success: false, error: error.message || 'Terjadi kesalahan server internal saat memproses file.' });
+    } finally {
+        // Hapus file dari Gemini API jika File API digunakan
+        if (geminiFileToDelete) {
+            try {
+                await ai.files.delete({ name: geminiFileToDelete });
+                console.log(`File Gemini ${geminiFileToDelete} berhasil dihapus.`);
+            } catch (cleanupError) {
+                console.error(`Gagal menghapus file Gemini ${geminiFileToDelete}:`, cleanupError);
+            }
+        }
     }
 });
 
 
-// 3. Endpoint Khusus Gambar
-/**
- * Endpoint POST untuk menangani analisis gambar (teks + gambar).
- * Penggunaan: Kirim permintaan POST dengan multipart/form-data.
- * - 'prompt': Pertanyaan tentang gambar.
- * - 'image': File gambar.
- */
+// 3. Endpoint Khusus Gambar (Dipertahankan, menggunakan inline-upload)
 app.post('/generate-from-image', upload.single('image'), async (req, res) => {
     try {
         const { prompt } = req.body;
         const uploadedFile = req.file;
 
-        if (!uploadedFile) {
-            return res.status(400).json({ error: 'File gambar bernama "image" wajib diisi.' });
-        }
-        if (!prompt) {
-            // Catatan: Prompt seringkali opsional untuk image-to-text, 
-            // tetapi mewajibkannya menyederhanakan alur berdasarkan penggunaan umum.
-            return res.status(400).json({ error: 'Kolom "prompt" wajib diisi.' });
+        if (!uploadedFile || !prompt) {
+             return res.status(400).json({ error: 'File gambar dan prompt wajib diisi.' });
         }
         
-        console.log(`Memproses gambar: ${uploadedFile.originalname}, MIME: ${uploadedFile.mimetype}`);
-        
-        // Periksa ukuran file menggunakan konstanta yang sudah ada
+        // Memastikan file tidak melebihi batas inline
         if (uploadedFile.size > MAX_UKURAN_FILE_INLINE) {
-            return res.status(400).json({ 
-                error: `File terlalu besar (${uploadedFile.size} bytes). Ukuran maksimal untuk upload inline adalah ${MAX_UKURAN_FILE_INLINE} bytes (4MB).` 
-            });
+            return res.status(400).json({ error: `File terlalu besar. Maksimal 4MB.` });
         }
 
-        // Konversi buffer ke GenerativePart inline
         const imagePart = fileKeGenerativePart(uploadedFile.buffer, uploadedFile.mimetype);
-
-        // Array contents menggabungkan prompt teks dan gambar
-        const contents = [
-            imagePart,
-            { text: prompt }
-        ];
-
-        // Panggil API Gemini
-        console.log('Memanggil API Gemini untuk analisis gambar...');
         const resp = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: contents,
+            contents: [imagePart, { text: prompt }],
         });
-
-        // Ekstrak dan Kirim Respons
         res.json({ result: ekstrakTeks(resp) });
 
     } catch (err) {
-        console.error('Kesalahan API:', err);
-        // Kembalikan pesan kesalahan yang bersih
         res.status(500).json({ error: err.message || 'Terjadi kesalahan server internal selama pembuatan gambar.' });
     }
 });
 
-// 4. Endpoint Khusus Dokumen
-/**
- * Endpoint POST untuk menangani ringkasan/analisis dokumen (teks + dokumen).
- * Penggunaan: Kirim permintaan POST dengan multipart/form-data.
- * - 'prompt': Pertanyaan/instruksi tambahan tentang dokumen (opsional).
- * - 'document': File dokumen (misalnya PDF, TXT, DOCX).
- */
-app.post('/generate-from-document', upload.single('document'), async (req, res) => {
+
+// 6. Endpoint Obrolan Berkelanjutan (Hanya Teks)
+app.post('/chat', async (req, res) => {
     try {
-        const { prompt } = req.body;
-        const uploadedFile = req.file;
-
-        if (!uploadedFile) {
-            return res.status(400).json({ error: 'File dokumen bernama "document" wajib diisi.' });
-        }
-        
-        console.log(`Memproses dokumen: ${uploadedFile.originalname}, MIME: ${uploadedFile.mimetype}`);
-        
-        // Periksa ukuran file menggunakan konstanta yang sudah ada
-        if (uploadedFile.size > MAX_UKURAN_FILE_INLINE) {
-            return res.status(400).json({ 
-                error: `File terlalu besar (${uploadedFile.size} bytes). Ukuran maksimal untuk upload inline adalah ${MAX_UKURAN_FILE_INLINE} bytes (4MB).` 
-            });
+        const { conversation } = req.body; 
+        if (!conversation || conversation.length === 0) {
+            return res.status(400).json({ success: false, message: 'Riwayat percakapan wajib diisi.' });
         }
 
-        // Konversi buffer ke GenerativePart inline
-        const documentPart = fileKeGenerativePart(uploadedFile.buffer, uploadedFile.mimetype);
-
-        // **Perubahan Kunci:** Terapkan awalan untuk ringkasan.
-        const summaryPrefix = "Ringkas dokumen berikut: "; 
-        const fullPrompt = summaryPrefix + (prompt || ""); // Tambahkan prompt pengguna (jika ada)
-
-        // Array contents menggabungkan bagian dokumen dan prompt akhir
-        const contents = [
-            documentPart,
-            { text: fullPrompt }
-        ];
-
-        // Panggil API Gemini
-        console.log('Memanggil API Gemini untuk analisis dokumen...');
+        const geminiContents = konversiRiwayat(conversation);
         const resp = await ai.models.generateContent({
             model: GEMINI_MODEL,
-            contents: contents,
+            contents: geminiContents,
         });
 
-        // Ekstrak dan Kirim Respons
-        res.json({ result: ekstrakTeks(resp) });
-
+        const resultText = ekstrakTeks(resp);
+        res.json({ success: true, data: resultText }); 
     } catch (err) {
-        console.error('Kesalahan API:', err);
-        // Kembalikan pesan kesalahan yang bersih
-        res.status(500).json({ error: err.message || 'Terjadi kesalahan server internal selama pemrosesan dokumen.' });
+        res.status(500).json({ success: false, message: err.message || 'Terjadi kesalahan server internal saat memproses obrolan.' });
     }
 });
 
-// 5. Endpoint Khusus Audio
-/**
- * Endpoint POST untuk menangani transkripsi/analisis audio (teks + audio).
- * Penggunaan: Kirim permintaan POST dengan multipart/form-data.
- * - 'prompt': Pertanyaan/instruksi tambahan tentang audio (opsional).
- * - 'audio': File audio.
- */
-app.post('/generate-from-audio', upload.single('audio'), async (req, res) => {
-    try {
-        const { prompt } = req.body;
-        const uploadedFile = req.file;
-
-        if (!uploadedFile) {
-            return res.status(400).json({ error: 'File audio bernama "audio" wajib diisi.' });
-        }
-        
-        console.log(`Memproses audio: ${uploadedFile.originalname}, MIME: ${uploadedFile.mimetype}`);
-        
-        // Periksa ukuran file menggunakan konstanta yang sudah ada
-        // Catatan: Untuk audio panjang, batas inline 4MB akan cepat tercapai. 
-        // Untuk produksi, File API (ai.files.upload) harus digunakan untuk audio/video besar.
-        if (uploadedFile.size > MAX_UKURAN_FILE_INLINE) {
-            return res.status(400).json({ 
-                error: `File terlalu besar (${uploadedFile.size} bytes). Ukuran maksimal untuk upload inline adalah ${MAX_UKURAN_FILE_INLINE} bytes (4MB). Harap gunakan File API untuk file yang lebih besar.` 
-            });
-        }
-
-        // Konversi buffer ke GenerativePart inline
-        const audioPart = fileKeGenerativePart(uploadedFile.buffer, uploadedFile.mimetype);
-
-        // **Perubahan Kunci:** Terapkan awalan untuk transkripsi.
-        const transcriptionPrefix = "Transkrip audio berikut: "; 
-        const fullPrompt = transcriptionPrefix + (prompt || ""); // Tambahkan prompt pengguna (jika ada)
-
-        // Array contents menggabungkan bagian audio dan prompt akhir
-        const contents = [
-            audioPart,
-            { text: fullPrompt }
-        ];
-
-        // Panggil API Gemini
-        console.log('Memanggil API Gemini untuk analisis audio...');
-        const resp = await ai.models.generateContent({
-            model: GEMINI_MODEL,
-            contents: contents,
-        });
-
-        // Ekstrak dan Kirim Respons
-        res.json({ result: ekstrakTeks(resp) });
-
-    } catch (err) {
-        console.error('Kesalahan API:', err);
-        // Kembalikan pesan kesalahan yang bersih
-        res.status(500).json({ error: err.message || 'Terjadi kesalahan server internal selama pemrosesan audio.' });
-    }
-});
 
 // ====================================================================
 // MULAI SERVER
